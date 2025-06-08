@@ -25,11 +25,5 @@ variable "bucket_name" {
 variable "notification_email" {
   description = "Email address for notifications"
   type        = string
-  default     = "your-email@example.com"  # Change this to your email
-}
-
-variable "notification_email" {
-  description = "Email address for notifications"
-  type        = string
-  default     = "your-email@example.com"  # Change this to your email
+  default     = "anu.op@outlook.com"
 }

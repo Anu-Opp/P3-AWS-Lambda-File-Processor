@@ -12,7 +12,7 @@ provider "aws" {
   region = var.aws_region
 }
 
-# S3 Bucket for file uploads with custom name
+# S3 Bucket for file uploads
 resource "aws_s3_bucket" "file_upload_bucket" {
   bucket = "p3-lambda-file-processor-uploads"
   
@@ -34,7 +34,6 @@ resource "aws_s3_bucket_versioning" "file_upload_bucket_versioning" {
 # S3 Bucket public access configuration
 resource "aws_s3_bucket_public_access_block" "file_upload_bucket_pab" {
   bucket = aws_s3_bucket.file_upload_bucket.id
-
   block_public_acls       = false
   block_public_policy     = false
   ignore_public_acls      = false
@@ -44,7 +43,6 @@ resource "aws_s3_bucket_public_access_block" "file_upload_bucket_pab" {
 # S3 Bucket policy for public uploads
 resource "aws_s3_bucket_policy" "file_upload_bucket_policy" {
   bucket = aws_s3_bucket.file_upload_bucket.id
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -57,24 +55,66 @@ resource "aws_s3_bucket_policy" "file_upload_bucket_policy" {
           "s3:GetObject"
         ]
         Resource = "${aws_s3_bucket.file_upload_bucket.arn}/*"
-      },
-      {
-        Sid       = "PublicListAccess"
-        Effect    = "Allow"
-        Principal = "*"
-        Action    = "s3:ListBucket"
-        Resource  = aws_s3_bucket.file_upload_bucket.arn
       }
     ]
   })
-
   depends_on = [aws_s3_bucket_public_access_block.file_upload_bucket_pab]
+}
+
+# DynamoDB table for processing logs
+resource "aws_dynamodb_table" "file_processing_log" {
+  name           = "file-processing-log"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "processing_id"
+
+  attribute {
+    name = "processing_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "timestamp"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name               = "timestamp-index"
+    hash_key           = "timestamp"
+    projection_type    = "ALL"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = {
+    Name        = "P3-File-Processing-Log"
+    Environment = var.environment
+    Project     = "P3-AWS-Lambda-File-Processor"
+  }
+}
+
+# SNS Topic for notifications
+resource "aws_sns_topic" "file_processing_notifications" {
+  name = "p3-file-processing-notifications"
+  tags = {
+    Name        = "P3-File-Processing-Notifications"
+    Environment = var.environment
+    Project     = "P3-AWS-Lambda-File-Processor"
+  }
+}
+
+# SNS Topic subscription (email)
+resource "aws_sns_topic_subscription" "email_notification" {
+  topic_arn = aws_sns_topic.file_processing_notifications.arn
+  protocol  = "email"
+  endpoint  = var.notification_email
 }
 
 # IAM role for Lambda
 resource "aws_iam_role" "lambda_role" {
   name = "P3-lambda-file-processor-role"
-
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -87,7 +127,6 @@ resource "aws_iam_role" "lambda_role" {
       }
     ]
   })
-
   tags = {
     Name        = "P3-Lambda-File-Processor-Role"
     Environment = var.environment
@@ -95,11 +134,10 @@ resource "aws_iam_role" "lambda_role" {
   }
 }
 
-# IAM policy for Lambda
+# Enhanced IAM policy for Lambda
 resource "aws_iam_role_policy" "lambda_policy" {
   name = "P3-lambda-file-processor-policy"
   role = aws_iam_role.lambda_role.id
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -127,6 +165,28 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "s3:ListBucket"
         ]
         Resource = aws_s3_bucket.file_upload_bucket.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.file_processing_log.arn,
+          "${aws_dynamodb_table.file_processing_log.arn}/index/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "sns:Publish"
+        ]
+        Resource = aws_sns_topic.file_processing_notifications.arn
       }
     ]
   })
@@ -138,6 +198,17 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+# CloudWatch Log Group for Lambda
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/P3-lambda-file-processor"
+  retention_in_days = 14
+  tags = {
+    Name        = "P3-Lambda-Logs"
+    Environment = var.environment
+    Project     = "P3-AWS-Lambda-File-Processor"
+  }
+}
+
 # Lambda function
 resource "aws_lambda_function" "file_processor" {
   filename         = "../lambda-code/lambda_function.zip"
@@ -146,12 +217,13 @@ resource "aws_lambda_function" "file_processor" {
   handler         = "lambda_function.lambda_handler"
   runtime          = "python3.9"
   timeout          = 60
-
   source_code_hash = filebase64sha256("../lambda-code/lambda_function.zip")
 
   environment {
     variables = {
       BUCKET_NAME = aws_s3_bucket.file_upload_bucket.bucket
+      DYNAMODB_TABLE = aws_dynamodb_table.file_processing_log.name
+      SNS_TOPIC_ARN = aws_sns_topic.file_processing_notifications.arn
     }
   }
 
@@ -164,14 +236,38 @@ resource "aws_lambda_function" "file_processor" {
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic_execution,
     aws_iam_role_policy.lambda_policy,
+    aws_cloudwatch_log_group.lambda_logs,
   ]
+}
+
+# CloudWatch Alarm for Lambda errors
+resource "aws_cloudwatch_metric_alarm" "lambda_error_alarm" {
+  alarm_name          = "p3-lambda-errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = "60"
+  statistic           = "Sum"
+  threshold           = "1"
+  alarm_description   = "This metric monitors lambda errors"
+  alarm_actions       = [aws_sns_topic.file_processing_notifications.arn]
+
+  dimensions = {
+    FunctionName = aws_lambda_function.file_processor.function_name
+  }
+
+  tags = {
+    Name        = "P3-Lambda-Error-Alarm"
+    Environment = var.environment
+    Project     = "P3-AWS-Lambda-File-Processor"
+  }
 }
 
 # API Gateway REST API
 resource "aws_api_gateway_rest_api" "file_processor_api" {
   name        = "P3-lambda-file-processor-api"
   description = "API Gateway for P3 Lambda File Processor"
-
   tags = {
     Name        = "P3-Lambda-File-Processor-API"
     Environment = var.environment
@@ -186,7 +282,7 @@ resource "aws_api_gateway_resource" "processor_resource" {
   path_part   = "process"
 }
 
-# API Gateway Method
+# API Gateway POST Method
 resource "aws_api_gateway_method" "processor_method" {
   rest_api_id   = aws_api_gateway_rest_api.file_processor_api.id
   resource_id   = aws_api_gateway_resource.processor_resource.id
@@ -194,12 +290,11 @@ resource "aws_api_gateway_method" "processor_method" {
   authorization = "NONE"
 }
 
-# API Gateway Integration
+# API Gateway POST Integration
 resource "aws_api_gateway_integration" "lambda_integration" {
   rest_api_id = aws_api_gateway_rest_api.file_processor_api.id
   resource_id = aws_api_gateway_resource.processor_resource.id
   http_method = aws_api_gateway_method.processor_method.http_method
-
   integration_http_method = "POST"
   type                   = "AWS_PROXY"
   uri                    = aws_lambda_function.file_processor.invoke_arn
@@ -214,20 +309,16 @@ resource "aws_lambda_permission" "api_gateway" {
   source_arn    = "${aws_api_gateway_rest_api.file_processor_api.execution_arn}/*/*"
 }
 
-# API Gateway Deployment (without deprecated stage_name)
+# API Gateway Deployment
 resource "aws_api_gateway_deployment" "processor_deployment" {
   depends_on = [
     aws_api_gateway_method.processor_method,
     aws_api_gateway_integration.lambda_integration,
   ]
-
   rest_api_id = aws_api_gateway_rest_api.file_processor_api.id
-
   lifecycle {
     create_before_destroy = true
   }
-
-  # Trigger redeployment when the configuration changes
   triggers = {
     redeployment = sha1(jsonencode([
       aws_api_gateway_resource.processor_resource.id,
@@ -237,12 +328,11 @@ resource "aws_api_gateway_deployment" "processor_deployment" {
   }
 }
 
-# API Gateway Stage (replaces deprecated stage_name in deployment)
+# API Gateway Stage
 resource "aws_api_gateway_stage" "processor_stage" {
   deployment_id = aws_api_gateway_deployment.processor_deployment.id
   rest_api_id   = aws_api_gateway_rest_api.file_processor_api.id
   stage_name    = var.environment
-
   tags = {
     Name        = "P3-Lambda-File-Processor-Stage"
     Environment = var.environment
@@ -250,7 +340,7 @@ resource "aws_api_gateway_stage" "processor_stage" {
   }
 }
 
-# Lambda permission for S3 (separate from API Gateway to avoid cycle)
+# Lambda permission for S3
 resource "aws_lambda_permission" "s3_trigger" {
   statement_id  = "AllowExecutionFromS3Bucket"
   action        = "lambda:InvokeFunction"
@@ -259,207 +349,12 @@ resource "aws_lambda_permission" "s3_trigger" {
   source_arn    = aws_s3_bucket.file_upload_bucket.arn
 }
 
-# S3 bucket notification (depends only on Lambda permission, not the function itself)
+# S3 bucket notification
 resource "aws_s3_bucket_notification" "bucket_notification" {
   bucket = aws_s3_bucket.file_upload_bucket.id
-
   lambda_function {
     lambda_function_arn = aws_lambda_function.file_processor.arn
     events              = ["s3:ObjectCreated:*"]
   }
-
   depends_on = [aws_lambda_permission.s3_trigger]
-}
-
-# API Gateway GET Method (for browser testing)
-resource "aws_api_gateway_method" "processor_get_method" {
-  rest_api_id   = aws_api_gateway_rest_api.file_processor_api.id
-  resource_id   = aws_api_gateway_resource.processor_resource.id
-  http_method   = "GET"
-  authorization = "NONE"
-}
-
-# API Gateway GET Integration
-resource "aws_api_gateway_integration" "lambda_get_integration" {
-  rest_api_id = aws_api_gateway_rest_api.file_processor_api.id
-  resource_id = aws_api_gateway_resource.processor_resource.id
-  http_method = aws_api_gateway_method.processor_get_method.http_method
-
-  integration_http_method = "POST"
-  type                   = "AWS_PROXY"
-  uri                    = aws_lambda_function.file_processor.invoke_arn
-}
-
-# DynamoDB table for processing logs
-resource "aws_dynamodb_table" "file_processing_log" {
-  name           = "file-processing-log"
-  billing_mode   = "PAY_PER_REQUEST"
-  hash_key       = "processing_id"
-
-  attribute {
-    name = "processing_id"
-    type = "S"
-  }
-
-  attribute {
-    name = "timestamp"
-    type = "S"
-  }
-
-  global_secondary_index {
-    name     = "timestamp-index"
-    hash_key = "timestamp"
-  }
-
-  ttl {
-    attribute_name = "ttl"
-    enabled        = true
-  }
-
-  tags = {
-    Name        = "P3-File-Processing-Log"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# SNS Topic for notifications
-resource "aws_sns_topic" "file_processing_notifications" {
-  name = "p3-file-processing-notifications"
-
-  tags = {
-    Name        = "P3-File-Processing-Notifications"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# SNS Topic subscription (email)
-resource "aws_sns_topic_subscription" "email_notification" {
-  topic_arn = aws_sns_topic.file_processing_notifications.arn
-  protocol  = "email"
-  endpoint  = var.notification_email
-}
-
-# CloudWatch Log Group for Lambda
-resource "aws_cloudwatch_log_group" "lambda_logs" {
-  name              = "/aws/lambda/${aws_lambda_function.file_processor.function_name}"
-  retention_in_days = 14
-
-  tags = {
-    Name        = "P3-Lambda-Logs"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# CloudWatch Alarm for Lambda errors
-resource "aws_cloudwatch_metric_alarm" "lambda_error_alarm" {
-  alarm_name          = "p3-lambda-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = "60"
-  statistic           = "Sum"
-  threshold           = "1"
-  alarm_description   = "This metric monitors lambda errors"
-  alarm_actions       = [aws_sns_topic.file_processing_notifications.arn]
-
-  dimensions = {
-    FunctionName = aws_lambda_function.file_processor.function_name
-  }
-
-  tags = {
-    Name        = "P3-Lambda-Error-Alarm"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# DynamoDB table for processing logs
-resource "aws_dynamodb_table" "file_processing_log" {
-  name           = "file-processing-log"
-  billing_mode   = "PAY_PER_REQUEST"
-  hash_key       = "processing_id"
-
-  attribute {
-    name = "processing_id"
-    type = "S"
-  }
-
-  attribute {
-    name = "timestamp"
-    type = "S"
-  }
-
-  global_secondary_index {
-    name     = "timestamp-index"
-    hash_key = "timestamp"
-  }
-
-  ttl {
-    attribute_name = "ttl"
-    enabled        = true
-  }
-
-  tags = {
-    Name        = "P3-File-Processing-Log"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# SNS Topic for notifications
-resource "aws_sns_topic" "file_processing_notifications" {
-  name = "p3-file-processing-notifications"
-
-  tags = {
-    Name        = "P3-File-Processing-Notifications"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# SNS Topic subscription (email)
-resource "aws_sns_topic_subscription" "email_notification" {
-  topic_arn = aws_sns_topic.file_processing_notifications.arn
-  protocol  = "email"
-  endpoint  = var.notification_email
-}
-
-# CloudWatch Log Group for Lambda
-resource "aws_cloudwatch_log_group" "lambda_logs" {
-  name              = "/aws/lambda/${aws_lambda_function.file_processor.function_name}"
-  retention_in_days = 14
-
-  tags = {
-    Name        = "P3-Lambda-Logs"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
-}
-
-# CloudWatch Alarm for Lambda errors
-resource "aws_cloudwatch_metric_alarm" "lambda_error_alarm" {
-  alarm_name          = "p3-lambda-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = "60"
-  statistic           = "Sum"
-  threshold           = "1"
-  alarm_description   = "This metric monitors lambda errors"
-  alarm_actions       = [aws_sns_topic.file_processing_notifications.arn]
-
-  dimensions = {
-    FunctionName = aws_lambda_function.file_processor.function_name
-  }
-
-  tags = {
-    Name        = "P3-Lambda-Error-Alarm"
-    Environment = var.environment
-    Project     = "P3-AWS-Lambda-File-Processor"
-  }
 }
