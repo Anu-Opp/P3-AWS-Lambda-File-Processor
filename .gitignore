@@ -1,0 +1,21 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfplan
+terraform/*.tfvars
+
+# Python
+__pycache__/
+*.py[cod]
+lambda-code/*.zip
+lambda-code/Pillow*
+lambda-code/PIL/
+lambda-code/*.dist-info/
+
+# AWS & IDE
+.aws/
+.vscode/
+.DS_Store
+*.log
