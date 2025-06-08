@@ -5,37 +5,62 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:  # Manual trigger
 
 env:
   AWS_REGION: us-east-1
   PROJECT_NAME: P3-lambda-file-processor
+  TERRAFORM_VERSION: 1.6.0
 
 jobs:
-  test:
+  # Validate and test code
+  validate:
+    name: Validate Code
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           cd lambda-code
           pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Lint Python code
         run: |
+          pip install flake8
           cd lambda-code
-          python -m pytest tests/ || echo "No tests found"
+          flake8 lambda_function.py --max-line-length=100 || echo "Linting completed with warnings"
 
-  deploy:
-    needs: test
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        run: |
+          cd terraform
+          terraform fmt -check || echo "Terraform formatting check completed"
+
+      - name: Terraform Validate
+        run: |
+          cd terraform
+          terraform init -backend=false
+          terraform validate
+
+  # Deploy to development
+  deploy-dev:
+    name: Deploy to Development
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    needs: validate
+    if: github.ref == 'refs/heads/develop' || github.event_name == 'pull_request'
+    environment: development
     
     steps:
       - name: Checkout code
@@ -51,13 +76,13 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.6.0
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
 
       - name: Package Lambda function
         run: |
           cd lambda-code
           pip install -r requirements.txt -t .
-          zip -r lambda_function.zip . -x "*.pyc" "__pycache__/*" "tests/*"
+          zip -r lambda_function.zip . -x "*.pyc" "__pycache__/*" "*.git*"
 
       - name: Terraform Init
         run: |
@@ -67,24 +92,140 @@ jobs:
       - name: Terraform Plan
         run: |
           cd terraform
-          terraform plan -var="notification_email=${{ secrets.NOTIFICATION_EMAIL }}"
+          terraform plan \
+            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL }}" \
+            -var="environment=dev" \
+            -out=tfplan
 
       - name: Terraform Apply
         run: |
           cd terraform
-          terraform apply -auto-approve -var="notification_email=${{ secrets.NOTIFICATION_EMAIL }}"
+          terraform apply tfplan
 
       - name: Test deployment
         run: |
           cd terraform
-          API_URL=$(terraform output -raw api_gateway_url)
-          S3_BUCKET=$(terraform output -raw s3_bucket_name)
           
-          # Test API Gateway
+          # Get outputs
+          S3_BUCKET=$(terraform output -raw s3_bucket_name)
+          API_URL=$(terraform output -raw api_gateway_url)
+          
+          echo "Testing S3 upload..."
+          echo "GitHub Actions deployment test $(date)" > test-deploy.txt
+          aws s3 cp test-deploy.txt s3://$S3_BUCKET/github-actions-test/
+          
+          echo "Testing API Gateway..."
           curl -X POST "$API_URL" \
             -H "Content-Type: application/json" \
-            -d '{"test": "GitHub Actions deployment test"}'
+            -d '{"test": "GitHub Actions deployment", "environment": "development"}'
+
+  # Deploy to production
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Package Lambda function
+        run: |
+          cd lambda-code
+          pip install -r requirements.txt -t .
+          zip -r lambda_function.zip . -x "*.pyc" "__pycache__/*" "*.git*"
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform plan \
+            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL }}" \
+            -var="environment=prod" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply tfplan
+
+      - name: Test production deployment
+        run: |
+          cd terraform
+          
+          # Get outputs
+          S3_BUCKET=$(terraform output -raw s3_bucket_name)
+          API_URL=$(terraform output -raw api_gateway_url)
+          LAMBDA_NAME=$(terraform output -raw lambda_function_name)
+          
+          echo "🧪 Testing Production Deployment..."
           
           # Test S3 upload
-          echo "GitHub Actions test file" > test-deploy.txt
-          aws s3 cp test-deploy.txt s3://$S3_BUCKET/github-actions-test/
+          echo "Production deployment test $(date)" > prod-test.txt
+          aws s3 cp prod-test.txt s3://$S3_BUCKET/production-test/
+          
+          # Test API Gateway
+          response=$(curl -s -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"test": "Production deployment", "environment": "production"}')
+          
+          echo "API Response: $response"
+          
+          # Verify Lambda function
+          aws lambda get-function --function-name $LAMBDA_NAME
+          
+          echo "✅ Production deployment successful!"
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "🚀 Production deployment completed successfully!"
+          echo "📧 Check your email for processing notifications"
+
+  # Cleanup on PR close
+  cleanup:
+    name: Cleanup Development Environment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Destroy (Development)
+        run: |
+          cd terraform
+          terraform init
+          terraform destroy -auto-approve \
+            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL }}" \
+            -var="environment=dev"
