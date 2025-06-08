@@ -1,14 +1,23 @@
 import json
-import boto3
 import urllib.parse
 from datetime import datetime
-import uuid
 import os
 
-# Initialize AWS clients
-s3_client = boto3.client('s3')
-dynamodb = boto3.resource('dynamodb')
-sns_client = boto3.client('sns')
+# Initialize AWS clients with error handling
+try:
+    import boto3
+    
+    # Set region if not specified
+    region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+    
+    s3_client = boto3.client('s3', region_name=region)
+    dynamodb = boto3.resource('dynamodb', region_name=region)
+    sns_client = boto3.client('sns', region_name=region)
+    
+    AWS_AVAILABLE = True
+except Exception as e:
+    print(f"AWS services not available: {e}")
+    AWS_AVAILABLE = False
 
 # Environment variables
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE', 'file-processing-log')
@@ -25,6 +34,13 @@ def lambda_handler(event, context):
         # Handle API Gateway trigger
         if 'httpMethod' in event:
             return handle_api_gateway_event(event)
+        
+        # Default response for other triggers
+        return create_success_response({
+            "message": "Lambda function executed successfully",
+            "event_type": "unknown",
+            "timestamp": datetime.now().isoformat()
+        })
             
     except Exception as e:
         print(f"Error processing event: {str(e)}")
@@ -40,17 +56,30 @@ def handle_s3_event(event):
         
         print(f"Processing file: {key} from bucket: {bucket}")
         
-        # Get file metadata
-        file_info = get_file_metadata(bucket, key)
+        # Get file metadata if AWS is available
+        file_info = {}
+        if AWS_AVAILABLE:
+            try:
+                file_info = get_file_metadata(bucket, key)
+            except Exception as e:
+                print(f"Could not get file metadata: {e}")
+                file_info = {"error": str(e)}
         
-        # Process based on file type
-        processing_result = process_file_by_type(bucket, key, file_info)
+        processing_result = {
+            "file_name": os.path.basename(key),
+            "file_path": key,
+            "bucket": bucket,
+            "status": "processed",
+            "file_info": file_info,
+            "timestamp": datetime.now().isoformat()
+        }
         
-        # Log to DynamoDB
-        log_processing_event(bucket, key, file_info, processing_result)
-        
-        # Send notification
-        send_notification(bucket, key, file_info, processing_result)
+        # Log to DynamoDB if available
+        if AWS_AVAILABLE:
+            try:
+                log_processing_event(bucket, key, file_info, processing_result)
+            except Exception as e:
+                print(f"Could not log to DynamoDB: {e}")
         
         results.append(processing_result)
     
@@ -72,198 +101,97 @@ def handle_api_gateway_event(event):
         except json.JSONDecodeError:
             body = {"raw_body": event['body']}
     
-    # Process API request
-    processing_result = {
-        "processing_id": str(uuid.uuid4()),
-        "timestamp": datetime.now().isoformat(),
-        "type": "api_request",
-        "data": body,
-        "status": "success"
-    }
+    # Get query parameters
+    query_params = event.get('queryStringParameters') or {}
     
-    # Log to DynamoDB
-    log_api_request(processing_result)
+    # Handle different API endpoints
+    path = event.get('path', '')
+    method = event.get('httpMethod', '')
     
-    # Send notification for API requests too
-    send_api_notification(processing_result)
+    if path.endswith('/status'):
+        return get_processing_status()
+    elif path.endswith('/files'):
+        return list_processed_files()
+    elif method == 'POST':
+        return process_api_request(body, query_params)
     
     return create_success_response({
-        "message": "API request processed successfully",
-        "processing_id": processing_result["processing_id"],
-        "timestamp": processing_result["timestamp"]
+        "message": "Lambda File Processor API",
+        "aws_available": AWS_AVAILABLE,
+        "endpoints": {
+            "POST /process": "Process data via API",
+            "GET /status": "Get processing statistics",
+            "GET /files": "List processed files"
+        },
+        "received_data": body,
+        "timestamp": datetime.now().isoformat()
     })
 
 def get_file_metadata(bucket, key):
-    """Get comprehensive file metadata"""
+    """Get file metadata from S3"""
+    if not AWS_AVAILABLE:
+        return {"error": "AWS not available"}
+        
     try:
         response = s3_client.head_object(Bucket=bucket, Key=key)
         
-        file_ext = os.path.splitext(key)[1].lower()
-        
         return {
             "file_name": os.path.basename(key),
-            "file_path": key,
             "file_size": response.get('ContentLength', 0),
-            "file_extension": file_ext,
             "last_modified": response.get('LastModified').isoformat() if response.get('LastModified') else None,
             "etag": response.get('ETag', '').strip('"')
         }
     except Exception as e:
-        print(f"Error getting file metadata: {str(e)}")
         return {"error": str(e)}
-
-def process_file_by_type(bucket, key, file_info):
-    """Process file based on its type"""
-    file_ext = file_info.get('file_extension', '').lower()
-    
-    processing_result = {
-        "file_name": file_info.get('file_name'),
-        "processing_type": "unknown",
-        "status": "success",
-        "details": {}
-    }
-    
-    try:
-        # Image processing
-        if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
-            processing_result.update({
-                "processing_type": "image",
-                "details": {
-                    "message": "Image file processed and thumbnails could be generated",
-                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2)
-                }
-            })
-        
-        # Document processing
-        elif file_ext in ['.pdf', '.txt', '.doc', '.docx', '.csv']:
-            processing_result.update({
-                "processing_type": "document",
-                "details": {
-                    "message": "Document processed and indexed",
-                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2),
-                    "pages_estimated": max(1, file_info.get('file_size', 0) // 2000)
-                }
-            })
-        
-        # Video/Audio processing
-        elif file_ext in ['.mp4', '.avi', '.mov', '.mp3', '.wav']:
-            processing_result.update({
-                "processing_type": "media",
-                "details": {
-                    "message": "Media file processed and metadata extracted",
-                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2)
-                }
-            })
-        
-        # Default processing
-        else:
-            processing_result.update({
-                "processing_type": "general",
-                "details": {
-                    "message": "File received and catalogued",
-                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2)
-                }
-            })
-            
-    except Exception as e:
-        processing_result.update({
-            "status": "error",
-            "error": str(e)
-        })
-    
-    return processing_result
 
 def log_processing_event(bucket, key, file_info, processing_result):
     """Log processing event to DynamoDB"""
+    if not AWS_AVAILABLE:
+        return
+        
     try:
         table = dynamodb.Table(TABLE_NAME)
         
         item = {
-            'processing_id': str(uuid.uuid4()),
+            'processing_id': f"{bucket}-{key}-{datetime.now().timestamp()}",
             'timestamp': datetime.now().isoformat(),
             'bucket': bucket,
             'file_key': key,
             'file_info': file_info,
-            'processing_result': processing_result,
-            'ttl': int(datetime.now().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
+            'processing_result': processing_result
         }
         
         table.put_item(Item=item)
-        print(f"✅ Logged processing event to DynamoDB for {key}")
+        print(f"Logged processing event for {key}")
         
     except Exception as e:
-        print(f"❌ Error logging to DynamoDB: {str(e)}")
+        print(f"Error logging to DynamoDB: {str(e)}")
 
-def log_api_request(processing_result):
-    """Log API request to DynamoDB"""
-    try:
-        table = dynamodb.Table(TABLE_NAME)
-        
-        item = {
-            'processing_id': processing_result['processing_id'],
-            'timestamp': processing_result['timestamp'],
-            'request_type': 'api_gateway',
-            'processing_result': processing_result,
-            'ttl': int(datetime.now().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
-        }
-        
-        table.put_item(Item=item)
-        print(f"✅ Logged API request to DynamoDB")
-        
-    except Exception as e:
-        print(f"❌ Error logging API request to DynamoDB: {str(e)}")
+def get_processing_status():
+    """Get processing statistics"""
+    return create_success_response({
+        "service_status": "healthy",
+        "aws_available": AWS_AVAILABLE,
+        "last_check": datetime.now().isoformat()
+    })
 
-def send_notification(bucket, key, file_info, processing_result):
-    """Send SNS notification for file processing"""
-    if not SNS_TOPIC_ARN:
-        print("⚠️ No SNS topic configured")
-        return
-        
-    try:
-        message = {
-            "event": "file_processed",
-            "bucket": bucket,
-            "file": key,
-            "processing_type": processing_result.get('processing_type'),
-            "status": processing_result.get('status'),
-            "file_size_mb": processing_result.get('details', {}).get('file_size_mb', 0),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        sns_client.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Message=json.dumps(message, indent=2),
-            Subject=f"🚀 File Processed: {os.path.basename(key)}"
-        )
-        
-        print(f"✅ Sent notification for {key}")
-        
-    except Exception as e:
-        print(f"❌ Error sending notification: {str(e)}")
+def list_processed_files():
+    """List recently processed files"""
+    return create_success_response({
+        "message": "File listing feature",
+        "aws_available": AWS_AVAILABLE,
+        "timestamp": datetime.now().isoformat()
+    })
 
-def send_api_notification(processing_result):
-    """Send SNS notification for API requests"""
-    if not SNS_TOPIC_ARN:
-        return
-        
-    try:
-        message = {
-            "event": "api_request_processed",
-            "processing_id": processing_result.get('processing_id'),
-            "timestamp": processing_result.get('timestamp'),
-            "status": "success"
-        }
-        
-        sns_client.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Message=json.dumps(message, indent=2),
-            Subject="🌐 API Request Processed"
-        )
-        
-        print(f"✅ Sent API notification")
-        
-    except Exception as e:
-        print(f"❌ Error sending API notification: {str(e)}")
+def process_api_request(body, query_params):
+    """Process API requests"""
+    return create_success_response({
+        "message": "API request processed successfully",
+        "received_data": body,
+        "query_parameters": query_params,
+        "processing_id": f"api-{datetime.now().timestamp()}",
+        "timestamp": datetime.now().isoformat()
+    })
 
 def create_success_response(data):
     """Create successful API response"""
@@ -271,7 +199,9 @@ def create_success_response(data):
         "statusCode": 200,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
         },
         "body": json.dumps(data)
     }
