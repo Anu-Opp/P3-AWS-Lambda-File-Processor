@@ -1,27 +1,40 @@
 # Terraform
-*.tfstate
-*.tfstate.*
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfplan
+terraform/*.tfvars
 *.tfvars
-.terraform/
-.terraform.lock.hcl
 
-# Lambda
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
 lambda-code/*.zip
-lambda-code/__pycache__/
-lambda-code/*.pyc
+lambda-code/Pillow*
+lambda-code/PIL/
+lambda-code/*.dist-info/
 
-# AWS
-.aws/
+# AWS CLI installation
+aws/
 
-# IDE
+# IDE and OS
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs and temporary files
 *.log
+test-deploy.txt
+test-file.txt
+
+# Backup files
+*_backup.py
