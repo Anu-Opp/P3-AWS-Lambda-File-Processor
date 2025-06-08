@@ -1,21 +1,27 @@
 # Terraform
-terraform/.terraform/
-terraform/.terraform.lock.hcl
-terraform/terraform.tfstate
-terraform/terraform.tfstate.backup
-terraform/*.tfplan
-terraform/*.tfvars
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
 
-# Python
-__pycache__/
-*.py[cod]
+# Lambda
 lambda-code/*.zip
-lambda-code/Pillow*
-lambda-code/PIL/
-lambda-code/*.dist-info/
+lambda-code/__pycache__/
+lambda-code/*.pyc
 
-# AWS & IDE
+# AWS
 .aws/
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
 *.log

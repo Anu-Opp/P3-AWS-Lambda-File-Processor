@@ -4,10 +4,6 @@ import urllib.parse
 from datetime import datetime
 import uuid
 import os
-import mimetypes
-from PIL import Image
-import io
-import base64
 
 # Initialize AWS clients
 s3_client = boto3.client('s3')
@@ -76,27 +72,25 @@ def handle_api_gateway_event(event):
         except json.JSONDecodeError:
             body = {"raw_body": event['body']}
     
-    # Get query parameters
-    query_params = event.get('queryStringParameters') or {}
+    # Process API request
+    processing_result = {
+        "processing_id": str(uuid.uuid4()),
+        "timestamp": datetime.now().isoformat(),
+        "type": "api_request",
+        "data": body,
+        "status": "success"
+    }
     
-    # Handle different API endpoints
-    path = event.get('path', '')
-    method = event.get('httpMethod', '')
+    # Log to DynamoDB
+    log_api_request(processing_result)
     
-    if path.endswith('/status'):
-        return get_processing_status()
-    elif path.endswith('/files'):
-        return list_processed_files()
-    elif method == 'POST':
-        return process_api_request(body, query_params)
+    # Send notification for API requests too
+    send_api_notification(processing_result)
     
     return create_success_response({
-        "message": "Lambda File Processor API",
-        "endpoints": {
-            "POST /process": "Process data via API",
-            "GET /status": "Get processing statistics",
-            "GET /files": "List processed files"
-        }
+        "message": "API request processed successfully",
+        "processing_id": processing_result["processing_id"],
+        "timestamp": processing_result["timestamp"]
     })
 
 def get_file_metadata(bucket, key):
@@ -104,16 +98,13 @@ def get_file_metadata(bucket, key):
     try:
         response = s3_client.head_object(Bucket=bucket, Key=key)
         
-        # Get file extension and MIME type
         file_ext = os.path.splitext(key)[1].lower()
-        mime_type, _ = mimetypes.guess_type(key)
         
         return {
             "file_name": os.path.basename(key),
             "file_path": key,
             "file_size": response.get('ContentLength', 0),
             "file_extension": file_ext,
-            "mime_type": mime_type,
             "last_modified": response.get('LastModified').isoformat() if response.get('LastModified') else None,
             "etag": response.get('ETag', '').strip('"')
         }
@@ -124,7 +115,6 @@ def get_file_metadata(bucket, key):
 def process_file_by_type(bucket, key, file_info):
     """Process file based on its type"""
     file_ext = file_info.get('file_extension', '').lower()
-    mime_type = file_info.get('mime_type', '')
     
     processing_result = {
         "file_name": file_info.get('file_name'),
@@ -135,16 +125,35 @@ def process_file_by_type(bucket, key, file_info):
     
     try:
         # Image processing
-        if mime_type and mime_type.startswith('image/'):
-            processing_result = process_image_file(bucket, key, file_info)
+        if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
+            processing_result.update({
+                "processing_type": "image",
+                "details": {
+                    "message": "Image file processed and thumbnails could be generated",
+                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2)
+                }
+            })
         
         # Document processing
-        elif file_ext in ['.pdf', '.txt', '.doc', '.docx']:
-            processing_result = process_document_file(bucket, key, file_info)
+        elif file_ext in ['.pdf', '.txt', '.doc', '.docx', '.csv']:
+            processing_result.update({
+                "processing_type": "document",
+                "details": {
+                    "message": "Document processed and indexed",
+                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2),
+                    "pages_estimated": max(1, file_info.get('file_size', 0) // 2000)
+                }
+            })
         
         # Video/Audio processing
-        elif mime_type and (mime_type.startswith('video/') or mime_type.startswith('audio/')):
-            processing_result = process_media_file(bucket, key, file_info)
+        elif file_ext in ['.mp4', '.avi', '.mov', '.mp3', '.wav']:
+            processing_result.update({
+                "processing_type": "media",
+                "details": {
+                    "message": "Media file processed and metadata extracted",
+                    "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2)
+                }
+            })
         
         # Default processing
         else:
@@ -164,81 +173,6 @@ def process_file_by_type(bucket, key, file_info):
     
     return processing_result
 
-def process_image_file(bucket, key, file_info):
-    """Process image files - create thumbnails"""
-    try:
-        # Download image
-        response = s3_client.get_object(Bucket=bucket, Key=key)
-        image_data = response['Body'].read()
-        
-        # Open with PIL
-        with Image.open(io.BytesIO(image_data)) as img:
-            # Get image dimensions
-            width, height = img.size
-            
-            # Create thumbnail
-            thumbnail = img.copy()
-            thumbnail.thumbnail((200, 200), Image.Resampling.LANCZOS)
-            
-            # Save thumbnail to S3
-            thumbnail_key = f"thumbnails/{os.path.splitext(key)[0]}_thumb.jpg"
-            thumbnail_buffer = io.BytesIO()
-            thumbnail.save(thumbnail_buffer, format='JPEG', quality=85)
-            thumbnail_buffer.seek(0)
-            
-            s3_client.put_object(
-                Bucket=bucket,
-                Key=thumbnail_key,
-                Body=thumbnail_buffer.getvalue(),
-                ContentType='image/jpeg'
-            )
-            
-            return {
-                "file_name": file_info.get('file_name'),
-                "processing_type": "image",
-                "status": "success",
-                "details": {
-                    "original_dimensions": f"{width}x{height}",
-                    "thumbnail_created": thumbnail_key,
-                    "format": img.format,
-                    "mode": img.mode
-                }
-            }
-    
-    except Exception as e:
-        return {
-            "file_name": file_info.get('file_name'),
-            "processing_type": "image",
-            "status": "error",
-            "error": str(e)
-        }
-
-def process_document_file(bucket, key, file_info):
-    """Process document files"""
-    return {
-        "file_name": file_info.get('file_name'),
-        "processing_type": "document",
-        "status": "success",
-        "details": {
-            "message": "Document processed and indexed",
-            "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2),
-            "pages_estimated": max(1, file_info.get('file_size', 0) // 2000)  # Rough estimate
-        }
-    }
-
-def process_media_file(bucket, key, file_info):
-    """Process video/audio files"""
-    return {
-        "file_name": file_info.get('file_name'),
-        "processing_type": "media",
-        "status": "success",
-        "details": {
-            "message": "Media file processed and metadata extracted",
-            "file_size_mb": round(file_info.get('file_size', 0) / 1024 / 1024, 2),
-            "duration_estimated": f"{file_info.get('file_size', 0) // 1000000} seconds"  # Very rough estimate
-        }
-    }
-
 def log_processing_event(bucket, key, file_info, processing_result):
     """Log processing event to DynamoDB"""
     try:
@@ -255,14 +189,34 @@ def log_processing_event(bucket, key, file_info, processing_result):
         }
         
         table.put_item(Item=item)
-        print(f"Logged processing event for {key}")
+        print(f"✅ Logged processing event to DynamoDB for {key}")
         
     except Exception as e:
-        print(f"Error logging to DynamoDB: {str(e)}")
+        print(f"❌ Error logging to DynamoDB: {str(e)}")
+
+def log_api_request(processing_result):
+    """Log API request to DynamoDB"""
+    try:
+        table = dynamodb.Table(TABLE_NAME)
+        
+        item = {
+            'processing_id': processing_result['processing_id'],
+            'timestamp': processing_result['timestamp'],
+            'request_type': 'api_gateway',
+            'processing_result': processing_result,
+            'ttl': int(datetime.now().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
+        }
+        
+        table.put_item(Item=item)
+        print(f"✅ Logged API request to DynamoDB")
+        
+    except Exception as e:
+        print(f"❌ Error logging API request to DynamoDB: {str(e)}")
 
 def send_notification(bucket, key, file_info, processing_result):
-    """Send SNS notification"""
+    """Send SNS notification for file processing"""
     if not SNS_TOPIC_ARN:
+        print("⚠️ No SNS topic configured")
         return
         
     try:
@@ -272,76 +226,44 @@ def send_notification(bucket, key, file_info, processing_result):
             "file": key,
             "processing_type": processing_result.get('processing_type'),
             "status": processing_result.get('status'),
+            "file_size_mb": processing_result.get('details', {}).get('file_size_mb', 0),
             "timestamp": datetime.now().isoformat()
         }
         
         sns_client.publish(
             TopicArn=SNS_TOPIC_ARN,
-            Message=json.dumps(message),
-            Subject=f"File Processed: {os.path.basename(key)}"
+            Message=json.dumps(message, indent=2),
+            Subject=f"🚀 File Processed: {os.path.basename(key)}"
         )
         
+        print(f"✅ Sent notification for {key}")
+        
     except Exception as e:
-        print(f"Error sending notification: {str(e)}")
+        print(f"❌ Error sending notification: {str(e)}")
 
-def get_processing_status():
-    """Get processing statistics from DynamoDB"""
+def send_api_notification(processing_result):
+    """Send SNS notification for API requests"""
+    if not SNS_TOPIC_ARN:
+        return
+        
     try:
-        table = dynamodb.Table(TABLE_NAME)
+        message = {
+            "event": "api_request_processed",
+            "processing_id": processing_result.get('processing_id'),
+            "timestamp": processing_result.get('timestamp'),
+            "status": "success"
+        }
         
-        # This is a simplified version - in production, you'd use better querying
-        response = table.scan(
-            Select='COUNT'
+        sns_client.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Message=json.dumps(message, indent=2),
+            Subject="🌐 API Request Processed"
         )
         
-        return create_success_response({
-            "total_files_processed": response.get('Count', 0),
-            "service_status": "healthy",
-            "last_check": datetime.now().isoformat()
-        })
+        print(f"✅ Sent API notification")
         
     except Exception as e:
-        return create_error_response(f"Error getting status: {str(e)}")
-
-def list_processed_files():
-    """List recently processed files"""
-    try:
-        table = dynamodb.Table(TABLE_NAME)
-        
-        # Get recent files (simplified - in production use better indexing)
-        response = table.scan(
-            Limit=10,
-            ProjectionExpression='processing_id, #ts, file_key, processing_result',
-            ExpressionAttributeNames={'#ts': 'timestamp'}
-        )
-        
-        files = []
-        for item in response.get('Items', []):
-            files.append({
-                "processing_id": item.get('processing_id'),
-                "timestamp": item.get('timestamp'),
-                "file": item.get('file_key'),
-                "status": item.get('processing_result', {}).get('status'),
-                "type": item.get('processing_result', {}).get('processing_type')
-            })
-        
-        return create_success_response({
-            "recent_files": files,
-            "count": len(files)
-        })
-        
-    except Exception as e:
-        return create_error_response(f"Error listing files: {str(e)}")
-
-def process_api_request(body, query_params):
-    """Process API requests"""
-    return create_success_response({
-        "message": "API request processed successfully",
-        "received_data": body,
-        "query_parameters": query_params,
-        "processing_id": str(uuid.uuid4()),
-        "timestamp": datetime.now().isoformat()
-    })
+        print(f"❌ Error sending API notification: {str(e)}")
 
 def create_success_response(data):
     """Create successful API response"""
@@ -349,9 +271,7 @@ def create_success_response(data):
         "statusCode": 200,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
+            "Access-Control-Allow-Origin": "*"
         },
         "body": json.dumps(data)
     }
