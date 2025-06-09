@@ -12,7 +12,11 @@ provider "aws" {
   region = var.aws_region
 }
 
+<<<<<<< HEAD
 # S3 Bucket for file uploads with custom name
+=======
+# S3 Bucket for file uploads
+>>>>>>> dev
 resource "aws_s3_bucket" "file_upload_bucket" {
   bucket = "p3-lambda-file-processor-uploads"
   
@@ -34,7 +38,10 @@ resource "aws_s3_bucket_versioning" "file_upload_bucket_versioning" {
 # S3 Bucket public access configuration
 resource "aws_s3_bucket_public_access_block" "file_upload_bucket_pab" {
   bucket = aws_s3_bucket.file_upload_bucket.id
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   block_public_acls       = false
   block_public_policy     = false
   ignore_public_acls      = false
@@ -44,7 +51,10 @@ resource "aws_s3_bucket_public_access_block" "file_upload_bucket_pab" {
 # S3 Bucket policy for public uploads
 resource "aws_s3_bucket_policy" "file_upload_bucket_policy" {
   bucket = aws_s3_bucket.file_upload_bucket.id
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -57,6 +67,7 @@ resource "aws_s3_bucket_policy" "file_upload_bucket_policy" {
           "s3:GetObject"
         ]
         Resource = "${aws_s3_bucket.file_upload_bucket.arn}/*"
+<<<<<<< HEAD
       },
       {
         Sid       = "PublicListAccess"
@@ -68,6 +79,11 @@ resource "aws_s3_bucket_policy" "file_upload_bucket_policy" {
     ]
   })
 
+=======
+      }
+    ]
+  })
+>>>>>>> dev
   depends_on = [aws_s3_bucket_public_access_block.file_upload_bucket_pab]
 }
 
@@ -88,8 +104,14 @@ resource "aws_dynamodb_table" "file_processing_log" {
   }
 
   global_secondary_index {
+<<<<<<< HEAD
     name     = "timestamp-index"
     hash_key = "timestamp"
+=======
+    name               = "timestamp-index"
+    hash_key           = "timestamp"
+    projection_type    = "ALL"
+>>>>>>> dev
   }
 
   ttl {
@@ -107,7 +129,10 @@ resource "aws_dynamodb_table" "file_processing_log" {
 # SNS Topic for notifications
 resource "aws_sns_topic" "file_processing_notifications" {
   name = "p3-file-processing-notifications"
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   tags = {
     Name        = "P3-File-Processing-Notifications"
     Environment = var.environment
@@ -125,7 +150,10 @@ resource "aws_sns_topic_subscription" "email_notification" {
 # IAM role for Lambda
 resource "aws_iam_role" "lambda_role" {
   name = "P3-lambda-file-processor-role"
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -138,7 +166,10 @@ resource "aws_iam_role" "lambda_role" {
       }
     ]
   })
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   tags = {
     Name        = "P3-Lambda-File-Processor-Role"
     Environment = var.environment
@@ -146,11 +177,18 @@ resource "aws_iam_role" "lambda_role" {
   }
 }
 
+<<<<<<< HEAD
 # Enhanced IAM policy for Lambda (includes DynamoDB and SNS permissions)
 resource "aws_iam_role_policy" "lambda_policy" {
   name = "P3-lambda-file-processor-policy"
   role = aws_iam_role.lambda_role.id
 
+=======
+# Enhanced IAM policy for Lambda
+resource "aws_iam_role_policy" "lambda_policy" {
+  name = "P3-lambda-file-processor-policy"
+  role = aws_iam_role.lambda_role.id
+>>>>>>> dev
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -215,7 +253,10 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 resource "aws_cloudwatch_log_group" "lambda_logs" {
   name              = "/aws/lambda/P3-lambda-file-processor"
   retention_in_days = 14
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   tags = {
     Name        = "P3-Lambda-Logs"
     Environment = var.environment
@@ -231,7 +272,10 @@ resource "aws_lambda_function" "file_processor" {
   handler         = "lambda_function.lambda_handler"
   runtime          = "python3.9"
   timeout          = 60
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   source_code_hash = filebase64sha256("../lambda-code/lambda_function.zip")
 
   environment {
@@ -283,7 +327,10 @@ resource "aws_cloudwatch_metric_alarm" "lambda_error_alarm" {
 resource "aws_api_gateway_rest_api" "file_processor_api" {
   name        = "P3-lambda-file-processor-api"
   description = "API Gateway for P3 Lambda File Processor"
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   tags = {
     Name        = "P3-Lambda-File-Processor-API"
     Environment = var.environment
@@ -311,6 +358,7 @@ resource "aws_api_gateway_integration" "lambda_integration" {
   rest_api_id = aws_api_gateway_rest_api.file_processor_api.id
   resource_id = aws_api_gateway_resource.processor_resource.id
   http_method = aws_api_gateway_method.processor_method.http_method
+<<<<<<< HEAD
 
   integration_http_method = "POST"
   type                   = "AWS_PROXY"
@@ -331,6 +379,8 @@ resource "aws_api_gateway_integration" "lambda_get_integration" {
   resource_id = aws_api_gateway_resource.processor_resource.id
   http_method = aws_api_gateway_method.processor_get_method.http_method
 
+=======
+>>>>>>> dev
   integration_http_method = "POST"
   type                   = "AWS_PROXY"
   uri                    = aws_lambda_function.file_processor.invoke_arn
@@ -350,6 +400,7 @@ resource "aws_api_gateway_deployment" "processor_deployment" {
   depends_on = [
     aws_api_gateway_method.processor_method,
     aws_api_gateway_integration.lambda_integration,
+<<<<<<< HEAD
     aws_api_gateway_method.processor_get_method,
     aws_api_gateway_integration.lambda_get_integration,
   ]
@@ -360,13 +411,23 @@ resource "aws_api_gateway_deployment" "processor_deployment" {
     create_before_destroy = true
   }
 
+=======
+  ]
+  rest_api_id = aws_api_gateway_rest_api.file_processor_api.id
+  lifecycle {
+    create_before_destroy = true
+  }
+>>>>>>> dev
   triggers = {
     redeployment = sha1(jsonencode([
       aws_api_gateway_resource.processor_resource.id,
       aws_api_gateway_method.processor_method.id,
       aws_api_gateway_integration.lambda_integration.id,
+<<<<<<< HEAD
       aws_api_gateway_method.processor_get_method.id,
       aws_api_gateway_integration.lambda_get_integration.id,
+=======
+>>>>>>> dev
     ]))
   }
 }
@@ -376,7 +437,10 @@ resource "aws_api_gateway_stage" "processor_stage" {
   deployment_id = aws_api_gateway_deployment.processor_deployment.id
   rest_api_id   = aws_api_gateway_rest_api.file_processor_api.id
   stage_name    = var.environment
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   tags = {
     Name        = "P3-Lambda-File-Processor-Stage"
     Environment = var.environment
@@ -396,11 +460,17 @@ resource "aws_lambda_permission" "s3_trigger" {
 # S3 bucket notification
 resource "aws_s3_bucket_notification" "bucket_notification" {
   bucket = aws_s3_bucket.file_upload_bucket.id
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   lambda_function {
     lambda_function_arn = aws_lambda_function.file_processor.arn
     events              = ["s3:ObjectCreated:*"]
   }
+<<<<<<< HEAD
 
+=======
+>>>>>>> dev
   depends_on = [aws_lambda_permission.s3_trigger]
 }
