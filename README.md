@@ -26,3 +26,5 @@ A sophisticated serverless file processing system built with AWS Lambda, S3, Dyn
 ## 📁 Project Structure
 E0F
 # CI/CD Pipeline Added
+## GitHub Actions CI/CD Pipeline
+Automated deployment with AWS Lambda
