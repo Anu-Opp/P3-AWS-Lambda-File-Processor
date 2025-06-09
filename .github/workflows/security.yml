@@ -2,7 +2,7 @@ name: Security and Dependency Scan
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, dev]
   schedule:
     - cron: '0 6 * * 1'  # Weekly on Monday
 
