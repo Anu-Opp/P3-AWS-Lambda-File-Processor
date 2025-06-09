@@ -1,27 +1,17 @@
 import json
+import boto3
 import urllib.parse
 from datetime import datetime
+import uuid
 import os
+import mimetypes
 
-# Initialize AWS clients with error handling
-try:
-    import boto3
-    
-    # Set region if not specified
-    region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
-    
-    s3_client = boto3.client('s3', region_name=region)
-    dynamodb = boto3.resource('dynamodb', region_name=region)
-    sns_client = boto3.client('sns', region_name=region)
-    
-    AWS_AVAILABLE = True
-except Exception as e:
-    print(f"AWS services not available: {e}")
-    AWS_AVAILABLE = False
+# Initialize AWS clients
+s3_client = boto3.client('s3')
+dynamodb = boto3.resource('dynamodb')
 
 # Environment variables
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE', 'file-processing-log')
-SNS_TOPIC_ARN = os.environ.get('SNS_TOPIC_ARN', '')
 
 def lambda_handler(event, context):
     print("Event received:", json.dumps(event))
@@ -34,13 +24,6 @@ def lambda_handler(event, context):
         # Handle API Gateway trigger
         if 'httpMethod' in event:
             return handle_api_gateway_event(event)
-        
-        # Default response for other triggers
-        return create_success_response({
-            "message": "Lambda function executed successfully",
-            "event_type": "unknown",
-            "timestamp": datetime.now().isoformat()
-        })
             
     except Exception as e:
         print(f"Error processing event: {str(e)}")
@@ -56,30 +39,14 @@ def handle_s3_event(event):
         
         print(f"Processing file: {key} from bucket: {bucket}")
         
-        # Get file metadata if AWS is available
-        file_info = {}
-        if AWS_AVAILABLE:
-            try:
-                file_info = get_file_metadata(bucket, key)
-            except Exception as e:
-                print(f"Could not get file metadata: {e}")
-                file_info = {"error": str(e)}
+        # Get file metadata
+        file_info = get_file_metadata(bucket, key)
         
-        processing_result = {
-            "file_name": os.path.basename(key),
-            "file_path": key,
-            "bucket": bucket,
-            "status": "processed",
-            "file_info": file_info,
-            "timestamp": datetime.now().isoformat()
-        }
+        # Process based on file type (without Pillow)
+        processing_result = process_file_basic(bucket, key, file_info)
         
-        # Log to DynamoDB if available
-        if AWS_AVAILABLE:
-            try:
-                log_processing_event(bucket, key, file_info, processing_result)
-            except Exception as e:
-                print(f"Could not log to DynamoDB: {e}")
+        # Log to DynamoDB
+        log_processing_event(bucket, key, file_info, processing_result)
         
         results.append(processing_result)
     
@@ -91,9 +58,6 @@ def handle_s3_event(event):
 
 def handle_api_gateway_event(event):
     """Handle API Gateway requests"""
-    print("API Gateway request received")
-    
-    # Parse request body
     body = {}
     if event.get('body'):
         try:
@@ -101,64 +65,81 @@ def handle_api_gateway_event(event):
         except json.JSONDecodeError:
             body = {"raw_body": event['body']}
     
-    # Get query parameters
     query_params = event.get('queryStringParameters') or {}
     
-    # Handle different API endpoints
-    path = event.get('path', '')
-    method = event.get('httpMethod', '')
-    
-    if path.endswith('/status'):
-        return get_processing_status()
-    elif path.endswith('/files'):
-        return list_processed_files()
-    elif method == 'POST':
-        return process_api_request(body, query_params)
-    
     return create_success_response({
-        "message": "Lambda File Processor API",
-        "aws_available": AWS_AVAILABLE,
-        "endpoints": {
-            "POST /process": "Process data via API",
-            "GET /status": "Get processing statistics",
-            "GET /files": "List processed files"
-        },
+        "message": "API request processed successfully",
         "received_data": body,
+        "query_parameters": query_params,
+        "processing_id": str(uuid.uuid4()),
         "timestamp": datetime.now().isoformat()
     })
 
 def get_file_metadata(bucket, key):
-    """Get file metadata from S3"""
-    if not AWS_AVAILABLE:
-        return {"error": "AWS not available"}
-        
+    """Get file metadata"""
     try:
         response = s3_client.head_object(Bucket=bucket, Key=key)
+        file_ext = os.path.splitext(key)[1].lower()
+        mime_type, _ = mimetypes.guess_type(key)
         
         return {
             "file_name": os.path.basename(key),
+            "file_path": key,
             "file_size": response.get('ContentLength', 0),
+            "file_extension": file_ext,
+            "mime_type": mime_type,
             "last_modified": response.get('LastModified').isoformat() if response.get('LastModified') else None,
             "etag": response.get('ETag', '').strip('"')
         }
     except Exception as e:
+        print(f"Error getting file metadata: {str(e)}")
         return {"error": str(e)}
+
+def process_file_basic(bucket, key, file_info):
+    """Basic file processing without image manipulation"""
+    file_ext = file_info.get('file_extension', '').lower()
+    mime_type = file_info.get('mime_type', '')
+    
+    if mime_type and mime_type.startswith('image/') or file_ext in ['.jpg', '.jpeg', '.png', '.gif']:
+        processing_type = "image"
+        details = {
+            "message": "Image file detected - thumbnail creation requires additional setup",
+            "file_size_mb": int(file_info.get('file_size', 0) // (1024 * 1024)),
+            "format": file_ext.replace('.', '').upper()
+        }
+    elif file_ext in ['.pdf', '.txt', '.doc', '.docx']:
+        processing_type = "document"
+        details = {
+            "message": "Document processed and catalogued",
+            "file_size_mb": int(file_info.get('file_size', 0) // (1024 * 1024))
+        }
+    else:
+        processing_type = "general"
+        details = {
+            "message": "File received and catalogued",
+            "file_size_mb": int(file_info.get('file_size', 0) // (1024 * 1024))
+        }
+    
+    return {
+        "file_name": file_info.get('file_name'),
+        "processing_type": processing_type,
+        "status": "success",
+        "details": details
+    }
 
 def log_processing_event(bucket, key, file_info, processing_result):
     """Log processing event to DynamoDB"""
-    if not AWS_AVAILABLE:
-        return
-        
     try:
         table = dynamodb.Table(TABLE_NAME)
         
         item = {
-            'processing_id': f"{bucket}-{key}-{datetime.now().timestamp()}",
+            'processing_id': str(uuid.uuid4()),
             'timestamp': datetime.now().isoformat(),
             'bucket': bucket,
             'file_key': key,
             'file_info': file_info,
-            'processing_result': processing_result
+            'processing_result': processing_result,
+            'ttl': int(datetime.now().timestamp()) + (30 * 24 * 60 * 60)
         }
         
         table.put_item(Item=item)
@@ -167,41 +148,13 @@ def log_processing_event(bucket, key, file_info, processing_result):
     except Exception as e:
         print(f"Error logging to DynamoDB: {str(e)}")
 
-def get_processing_status():
-    """Get processing statistics"""
-    return create_success_response({
-        "service_status": "healthy",
-        "aws_available": AWS_AVAILABLE,
-        "last_check": datetime.now().isoformat()
-    })
-
-def list_processed_files():
-    """List recently processed files"""
-    return create_success_response({
-        "message": "File listing feature",
-        "aws_available": AWS_AVAILABLE,
-        "timestamp": datetime.now().isoformat()
-    })
-
-def process_api_request(body, query_params):
-    """Process API requests"""
-    return create_success_response({
-        "message": "API request processed successfully",
-        "received_data": body,
-        "query_parameters": query_params,
-        "processing_id": f"api-{datetime.now().timestamp()}",
-        "timestamp": datetime.now().isoformat()
-    })
-
 def create_success_response(data):
     """Create successful API response"""
     return {
         "statusCode": 200,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
+            "Access-Control-Allow-Origin": "*"
         },
         "body": json.dumps(data)
     }
