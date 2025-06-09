@@ -28,3 +28,5 @@ E0F
 # CI/CD Pipeline Added
 ## GitHub Actions CI/CD Pipeline
 Automated deployment with AWS Lambda
+## GitHub Actions CI/CD - Working with Repository Secrets
+Automated deployment pipeline now configured with proper AWS credentials.
