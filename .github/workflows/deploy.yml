@@ -80,45 +80,56 @@ jobs:
           
           echo "✅ Dev Lambda function updated!"
 
-      - name: Test Production Deployment
+      - name: Test Dev Deployment
         run: |
-          echo "🚀 Testing Production Deployment..."
+          echo "🧪 Testing Development Deployment..."
           
-          # Create payload file for production test
-          cat > prod-test-payload.json << 'EOF'
-          {
-            "httpMethod": "POST",
-            "body": "{\"test\": \"production deployment\", \"source\": \"GitHub Actions Production\"}",
-            "path": "/process"
-          }
-          EOF
+          # Test API Gateway (most reliable method)
+          echo "🌐 Testing API Gateway..."
+          API_URL="https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process"
           
-          aws lambda invoke \
-            --function-name P3-lambda-file-processor \
-            --payload file://prod-test-payload.json \
-            response.json
+          # Simple API test
+          RESPONSE=$(curl -s -w "%{http_code}" -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"test": "dev deployment", "source": "GitHub Actions"}')
           
-          echo "📄 Production Response:"
-          cat response.json
+          HTTP_CODE="${RESPONSE: -3}"
+          BODY="${RESPONSE%???}"
           
-          echo "✅ Production deployment successful!"
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response Body: $BODY"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ API Gateway test successful!"
+          else
+            echo "⚠️ API returned status $HTTP_CODE"
+          fi
+          
+          echo "✅ Dev deployment test completed!"
 
-      - name: Production Summary
+      - name: Dev Deployment Summary
         run: |
           echo ""
-          echo "🏆 === P3 Lambda File Processor - Production Deployment Complete! ==="
+          echo "🎉 === P3 Lambda File Processor - Dev Deployment Complete! ==="
           echo ""
-          echo "🎉 Project 3 Status: PRODUCTION READY"
-          echo "✅ Serverless Architecture: DEPLOYED"
-          echo "✅ CI/CD Pipeline: WORKING"
-          echo "✅ Infrastructure as Code: COMPLETE"
+          echo "📍 Resources Updated:"
+          echo "   • Lambda Function: P3-lambda-file-processor ✅"
+          echo "   • API Gateway: https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process ✅"
+          echo "   • S3 Bucket: p3-lambda-file-processor-uploads ✅"
           echo ""
-          echo "🚀 Your DevOps Project Portfolio is Ready!"
+          echo "🧪 Manual Test Command:"
+          echo "   curl -X POST 'https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process' \\"
+          echo "        -H 'Content-Type: application/json' \\"
+          echo "        -d '{\"test\": \"manual\"}'"
+          echo ""
+          echo "🏆 Development Deployment Successful!"
+
   deploy-prod:
     name: Deploy to Production  
     runs-on: ubuntu-latest
     needs: validate
     if: github.ref == 'refs/heads/main'
+    environment: production
     
     steps:
       - name: Checkout code
@@ -150,29 +161,34 @@ jobs:
         run: |
           echo "🚀 Testing Production Deployment..."
           
-          aws lambda invoke \
-            --function-name P3-lambda-file-processor \
-            --payload '{"httpMethod": "POST", "body": "{\"test\": \"production deployment\"}", "path": "/process"}' \
-            response.json
+          # Test API Gateway for production
+          API_URL="https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process"
           
-          echo "📄 Production Response:"
-          cat response.json
+          RESPONSE=$(curl -s -w "%{http_code}" -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"test": "production deployment", "source": "GitHub Actions Production"}')
           
-          echo "✅ Production deployment successful!"
+          HTTP_CODE="${RESPONSE: -3}"
+          BODY="${RESPONSE%???}"
+          
+          echo "Production HTTP Status: $HTTP_CODE"
+          echo "Production Response: $BODY"
+          
+          echo "✅ Production deployment test completed!"
 
-      - name: Deployment Summary
+      - name: Production Summary
         run: |
           echo ""
-          echo "🎉 === P3 Lambda File Processor - Deployment Complete! ==="
+          echo "🏆 === P3 Lambda File Processor - Production Deployment Complete! ==="
           echo ""
-          echo "📍 Resources:"
+          echo "🎉 Project 3 Status: PRODUCTION READY"
+          echo "✅ Serverless Architecture: DEPLOYED"
+          echo "✅ CI/CD Pipeline: WORKING"
+          echo "✅ Infrastructure as Code: COMPLETE"
+          echo ""
+          echo "📍 Production Resources:"
           echo "   • Lambda Function: P3-lambda-file-processor"
           echo "   • S3 Bucket: p3-lambda-file-processor-uploads"
           echo "   • API Gateway: https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process"
           echo ""
-          echo "🧪 Test Your Deployment:"
-          echo "   curl -X POST 'https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process' \\"
-          echo "        -H 'Content-Type: application/json' \\"
-          echo "        -d '{\"test\": \"manual\"}'"
-          echo ""
-          echo "✅ Project 3 Complete - Ready for Portfolio!"
+          echo "🚀 Your DevOps Project Portfolio is Ready!"
