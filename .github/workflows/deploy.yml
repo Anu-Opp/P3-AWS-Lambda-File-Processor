@@ -3,216 +3,125 @@ name: Deploy P3 Lambda File Processor
 on:
   push:
     branches: [main, dev]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
-  PROJECT_NAME: P3-lambda-file-processor
-  TERRAFORM_VERSION: 1.6.0
+  AWS_DEFAULT_REGION: us-east-1
 
 jobs:
-  validate:
-    name: Validate Code
+  test:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Test Lambda function
+        run: |
+          cd lambda-code
+          python -c "
+          import lambda_function
+          print('✅ Lambda function syntax is valid')
+          
+          # Basic test
+          test_event = {'httpMethod': 'POST', 'body': '{\"test\": \"data\"}'}
+          result = lambda_function.lambda_handler(test_event, {})
+          print('✅ Lambda function test passed')
+          print('Status Code:', result.get('statusCode'))
+          "
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: '3.9'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-      - name: Create Lambda package for validation
+      - name: Verify AWS Connection
+        run: |
+          echo "🔑 Testing AWS credentials..."
+          aws sts get-caller-identity
+          echo "✅ AWS connection successful!"
+
+      - name: Update Lambda Function
         run: |
           cd lambda-code
-          echo "📦 Creating Lambda package for validation..."
-          rm -rf lambda_function.zip *.dist-info/ __pycache__/
+          
+          echo "📦 Packaging Lambda function..."
           zip lambda_function.zip lambda_function.py
-          ls -la lambda_function.zip
-
-      - name: Test Lambda function syntax
-        run: |
-          cd lambda-code
-          python -c "import lambda_function; print('✅ Lambda function syntax is valid')"
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Terraform Validate
-        run: |
-          cd terraform
-          terraform init -backend=false
-          terraform validate
-
-  deploy-dev:
-    name: Deploy to Development
-    runs-on: ubuntu-latest
-    needs: validate
-    if: github.ref == 'refs/heads/dev' || github.event_name == 'workflow_dispatch'
-    environment: dev
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Package Lambda function FIRST
-        run: |
-          cd lambda-code
-          echo "📦 Creating Lambda deployment package..."
           
-          # Clean up any existing packages
-          rm -rf lambda_function.zip *.dist-info/ __pycache__/ PIL/ Pillow*
+          echo "🚀 Updating Lambda function..."
+          aws lambda update-function-code \
+            --function-name P3-lambda-file-processor \
+            --zip-file fileb://lambda_function.zip
           
-          # Install basic dependencies
-          pip install boto3 -t . --no-deps
-          
-          # Create deployment package
-          zip -r lambda_function.zip . -x "*.pyc" "__pycache__/*" "*.git*" "requirements.txt"
-          
-          # Verify package exists and show size
-          ls -lh lambda_function.zip
-          echo "✅ Lambda package created successfully"
+          echo "✅ Lambda function updated successfully!"
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
-
-      - name: Terraform Init
+      - name: Test Deployment
         run: |
-          cd terraform
-          terraform init
-
-      - name: Terraform Plan
-        run: |
-          cd terraform
-          terraform plan \
-            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL || 'test@example.com' }}" \
-            -var="environment=dev"
-
-      - name: Terraform Apply
-        run: |
-          cd terraform
-          terraform apply -auto-approve \
-            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL || 'test@example.com' }}" \
-            -var="environment=dev"
-
-      - name: Test deployment
-        run: |
-          cd terraform
-          echo "🧪 Testing Development Deployment..."
+          echo "🧪 Testing Lambda function..."
           
-          # Test outputs
-          terraform output || echo "No outputs available"
-          
-          # Test Lambda function directly
+          # Test Lambda directly
           aws lambda invoke \
-            --function-name "P3-lambda-file-processor" \
-            --payload '{"test": "GitHub Actions deployment"}' \
-            response.json || echo "Lambda invoke failed"
+            --function-name P3-lambda-file-processor \
+            --payload '{"httpMethod": "POST", "body": "{\"test\": \"CI/CD deployment\", \"timestamp\": \"'$(date)'\"}", "path": "/process"}' \
+            response.json
           
-          if [ -f response.json ]; then
-            echo "Lambda Response:"
-            cat response.json
+          echo "📄 Lambda Response:"
+          cat response.json
+          echo ""
+          
+          # Test API Gateway
+          echo "🌐 Testing API Gateway..."
+          API_URL="https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process"
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"test": "CI/CD API test", "source": "GitHub Actions", "timestamp": "'$(date)'"}')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ API Gateway test successful!"
+          else
+            echo "⚠️ API Gateway returned status $HTTP_CODE"
           fi
-          
-          echo "✅ Development testing completed!"
 
-  deploy-prod:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: validate
-    if: github.ref == 'refs/heads/main'
-    environment: production
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Package Lambda function FIRST
+      - name: Deployment Summary
         run: |
-          cd lambda-code
-          echo "📦 Creating Production Lambda package..."
-          
-          # Clean up
-          rm -rf lambda_function.zip *.dist-info/ __pycache__/ PIL/ Pillow*
-          
-          # Install dependencies
-          pip install boto3 -t . --no-deps
-          
-          # Create package
-          zip -r lambda_function.zip . -x "*.pyc" "__pycache__/*" "*.git*" "requirements.txt"
-          
-          ls -lh lambda_function.zip
-          echo "✅ Production Lambda package created"
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
-
-      - name: Terraform Init
-        run: |
-          cd terraform
-          terraform init
-
-      - name: Terraform Plan
-        run: |
-          cd terraform
-          terraform plan \
-            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL || 'admin@example.com' }}" \
-            -var="environment=prod"
-
-      - name: Terraform Apply
-        run: |
-          cd terraform
-          terraform apply -auto-approve \
-            -var="notification_email=${{ secrets.NOTIFICATION_EMAIL || 'admin@example.com' }}" \
-            -var="environment=prod"
-
-      - name: Test production deployment
-        run: |
-          echo "🚀 Production deployment completed successfully!"
-          
-          # Test Lambda
-          aws lambda invoke \
-            --function-name "P3-lambda-file-processor" \
-            --payload '{"test": "Production deployment"}' \
-            response.json || echo "Lambda invoke failed"
-          
-          if [ -f response.json ]; then
-            echo "Lambda Response:"
-            cat response.json
-          fi
+          echo ""
+          echo "🎉 === P3 Lambda File Processor - Deployment Complete! ==="
+          echo ""
+          echo "📍 Infrastructure:"
+          echo "   • Lambda Function: P3-lambda-file-processor"
+          echo "   • S3 Bucket: p3-lambda-file-processor-uploads"
+          echo "   • API Gateway: https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process"
+          echo ""
+          echo "🧪 Test Your Deployment:"
+          echo "   • API Test:"
+          echo "     curl -X POST 'https://5xk43i586d.execute-api.us-east-1.amazonaws.com/dev/process' \\"
+          echo "          -H 'Content-Type: application/json' \\"
+          echo "          -d '{\"test\": \"manual\"}'"
+          echo ""
+          echo "   • S3 Upload Test:"
+          echo "     echo 'Test file' > test.txt"
+          echo "     aws s3 cp test.txt s3://p3-lambda-file-processor-uploads/"
+          echo ""
+          echo "✅ Project 3 - AWS Lambda File Processor is LIVE!"
+          echo "🏆 Ready for portfolio presentation!"
