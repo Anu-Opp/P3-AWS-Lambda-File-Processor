@@ -5,6 +5,12 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# ADD ONLY THIS PERMISSIONS SECTION - Everything else stays the same
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
 env:
   AWS_REGION: us-east-1
 
@@ -21,6 +27,13 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
+      # ADD THIS STEP - Install dependencies
+      - name: Install dependencies
+        run: |
+          cd lambda-code
+          pip install boto3
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Test Lambda function
         run: |
